@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>GPU Load Lab</title>
+<style>
+  :root{--bg:#0b0d10;--panel:rgba(20,24,30,.82);--fg:#e6edf3;--dim:#8b98a5;--acc:#00e5a8;--warn:#ff5c5c}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif;overflow:hidden;
+    overscroll-behavior:none;-webkit-user-select:none;user-select:none;touch-action:manipulation}
+  canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+  #fps{position:fixed;top:calc(env(safe-area-inset-top,0px) + 12px);left:calc(env(safe-area-inset-left,0px) + 12px);
+    background:var(--panel);border:1px solid #2a323c;border-radius:12px;padding:10px 16px;
+    -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
+  #fps .n{font:700 44px/1 ui-monospace,Menlo,monospace;color:var(--acc);font-variant-numeric:tabular-nums}
+  #fps .u{font-size:14px;color:var(--dim);margin-left:6px}
+  #fps .s{font:13px ui-monospace,Menlo,monospace;color:var(--dim);margin-top:4px}
+  #panel{position:fixed;left:50%;transform:translateX(-50%);
+    bottom:calc(env(safe-area-inset-bottom,0px) + 14px);width:min(680px,calc(100% - 24px));
+    background:var(--panel);border:1px solid #2a323c;border-radius:16px;padding:14px 18px 10px;
+    -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
+  .row{margin:6px 0 12px}
+  .head{display:flex;justify-content:space-between;align-items:center;font-size:14px;color:var(--dim);margin-bottom:4px}
+  .head b{color:var(--fg);font:600 18px ui-monospace,Menlo,monospace}
+  .ctl{display:flex;align-items:center;gap:10px}
+  button{width:44px;height:44px;border-radius:10px;border:1px solid #33404d;background:#161b22;color:var(--fg);
+    font-size:22px;flex:none}
+  button:active{background:#232b35}
+  input[type=range]{flex:1;height:44px;margin:0;background:transparent;-webkit-appearance:none;appearance:none;touch-action:pan-y}
+  input[type=range]::-webkit-slider-runnable-track{height:8px;border-radius:4px;background:#26303b}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:34px;height:34px;margin-top:-13px;border-radius:50%;
+    background:var(--acc);border:3px solid #06382b}
+  input[type=range]::-moz-range-track{height:8px;border-radius:4px;background:#26303b}
+  input[type=range]::-moz-range-thumb{width:30px;height:30px;border-radius:50%;background:var(--acc);border:3px solid #06382b}
+  #msg{font-size:12px;color:var(--dim);min-height:16px}
+  #msg.w{color:var(--warn)}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="fps">
+  <div><span class="n" id="fpsN">--</span><span class="u">fps</span></div>
+  <div class="s" id="fpsS">-- ms / frame</div>
+</div>
+
+<div id="panel">
+  <div class="row">
+    <div class="head"><span>Loop Count(負荷)</span><b id="loopV">300</b></div>
+    <div class="ctl">
+      <button data-t="loop" data-d="-10">−</button>
+      <input type="range" id="loop" min="1" max="4000" step="1" value="300">
+      <button data-t="loop" data-d="10">＋</button>
+    </div>
+  </div>
+  <div class="row">
+    <div class="head"><span>Resolution Scale(解像度)</span><b id="scaleV">100%</b></div>
+    <div class="ctl">
+      <button data-t="scale" data-d="-5">−</button>
+      <input type="range" id="scale" min="25" max="100" step="1" value="100">
+      <button data-t="scale" data-d="5">＋</button>
+    </div>
+  </div>
+  <div id="msg">Loopを増やすほどGPU負荷が上がりfpsが下がります。細かい調整は解像度も併用。</div>
+</div>
+
+<script>
+(() => {
+  const MAX_LOOP = 4000;           // シェーダー内ループの上限(安全のため固定)
+  const canvas = document.getElementById('c');
+  const gl = canvas.getContext('webgl', {antialias:false, alpha:false, powerPreference:'high-performance'});
+  const msg = document.getElementById('msg');
+  if (!gl) { msg.textContent = 'WebGLが使えません'; msg.className = 'w'; return; }
+
+  const vs = `attribute vec2 a; void main(){ gl_Position = vec4(a,0.,1.); }`;
+  const fs = `
+  precision highp float;
+  uniform vec2 uRes; uniform float uTime; uniform int uLoop;
+  void main(){
+    vec2 p = (gl_FragCoord.xy*2. - uRes) / min(uRes.x, uRes.y);
+    vec2 z = p * 1.5;
+    vec3 col = vec3(0.);
+    float acc = 0.;
+    for (int i = 0; i < ${MAX_LOOP}; i++) {
+      if (i >= uLoop) break;
+      float f = float(i);
+      z = vec2(sin(z.x*1.3 + z.y*0.7 + uTime*0.3 + f*0.011),
+               cos(z.y*1.7 - z.x*0.9 + f*0.023));
+      z += 0.15 * vec2(sin(z.y*3.1 + f), cos(z.x*2.7 - f));
+      acc += length(z);
+      col += 0.5 + 0.5*cos(vec3(0.,2.1,4.2) + acc*0.3 + f*0.05);
+    }
+    col /= max(float(uLoop), 1.);
+    gl_FragColor = vec4(pow(col, vec3(1.4)), 1.);
+  }`;
+
+  function sh(type, src){
+    const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  }
+  let prog;
+  try {
+    prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, vs));
+    gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  } catch (e) { msg.textContent = 'Shader error: ' + e.message; msg.className = 'w'; return; }
+  gl.useProgram(prog);
+
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, 'a');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  const uRes = gl.getUniformLocation(prog, 'uRes');
+  const uTime = gl.getUniformLocation(prog, 'uTime');
+  const uLoop = gl.getUniformLocation(prog, 'uLoop');
+
+  const loopEl = document.getElementById('loop'), scaleEl = document.getElementById('scale');
+  const loopV = document.getElementById('loopV'), scaleV = document.getElementById('scaleV');
+  let loop = +loopEl.value, scale = +scaleEl.value / 100;
+
+  function resize(){
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(1, Math.floor(innerWidth * dpr * scale));
+    const h = Math.max(1, Math.floor(innerHeight * dpr * scale));
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    gl.viewport(0, 0, w, h);
+  }
+  function update(){
+    loop = Math.min(MAX_LOOP, Math.max(1, +loopEl.value));
+    scale = +scaleEl.value / 100;
+    loopV.textContent = loop;
+    scaleV.textContent = Math.round(scale*100) + '%';
+    resize();
+  }
+  loopEl.addEventListener('input', update);
+  scaleEl.addEventListener('input', update);
+  addEventListener('resize', resize);
+  addEventListener('orientationchange', () => setTimeout(resize, 200));
+  document.querySelectorAll('button[data-t]').forEach(b => {
+    b.addEventListener('click', () => {
+      const el = b.dataset.t === 'loop' ? loopEl : scaleEl;
+      el.value = +el.value + +b.dataset.d; update();
+    });
+  });
+
+  // FPS計測(rAFタイムスタンプ, 0.5秒平均)
+  const fpsN = document.getElementById('fpsN'), fpsS = document.getElementById('fpsS');
+  let last = performance.now(), frames = 0, acc = 0, slowCount = 0;
+  const t0 = last;
+
+  function frame(now){
+    const dt = now - last; last = now;
+    frames++; acc += dt;
+    if (acc >= 500) {
+      const fps = frames * 1000 / acc;
+      fpsN.textContent = fps.toFixed(1);
+      fpsS.textContent = (acc / frames).toFixed(1) + ' ms / frame';
+      // 安全装置: 極端に重い(<2fps)状態が続いたらLoopを自動で半減
+      if (fps < 2) { if (++slowCount >= 2) {
+          loopEl.value = Math.max(1, Math.floor(loop / 2)); update();
+          msg.textContent = '負荷が高すぎたためLoop Countを自動的に下げました'; msg.className = 'w'; slowCount = 0;
+      } } else slowCount = 0;
+      frames = 0; acc = 0;
+    }
+    gl.uniform2f(uRes, canvas.width, canvas.height);
+    gl.uniform1f(uTime, (now - t0) / 1000);
+    gl.uniform1i(uLoop, loop);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    requestAnimationFrame(frame);
+  }
+  update();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
